@@ -68,3 +68,101 @@ class TransformerBlock(nn.Module):
         forward = self.feed_forward(x)
         out = self.dropout(self.norm2(forward + x))
         return out
+
+# In the original paper each head should have seperate weights, but in your code all heads share the same weights. here are two steps to fix it:
+# 1. in __init__:  self.queries = nn.Linear(self.embed_size, self.embed_size, bias=False) (same for key and value weights)
+# 2. in forward: put "queries = self.queries(queries)" above "queries = queries.reshape(...)" (also same for keys and values)
+
+class Encoder(nn.Module):
+    def __init__(self,
+                 src_vocab_size,
+                 embed_size,
+                 num_layers,
+                 heads,
+                 device,
+                 forward_expansion,
+                 dropout,
+                 max_length):
+        super(Encoder, self).__init__()
+        self.embed_size = embed_size
+        self.device = device
+        self.word_embedding = nn.Embedding(src_vocab_size, embed_size)
+        self.position_embedding = nn.Embedding(max_length, embed_size)
+
+        self.layers = nn.ModuleList(
+            [
+                TransformerBlock(
+                    embed_size,
+                    heads,
+                    dropout=dropout,
+                    forward_expansion=forward_expansion
+                )
+            ]
+        )
+        self.dropout = dropout
+
+    def forward(self, x, mask):
+        N, seq_length = x.shape
+        positions = torch.arange(0, seq_length).expand(N, seq_length).to(self.device)
+
+        out = self.dropout(self.word_embedding(x) + self.position_embedding(positions))
+        for layer in self.layers:
+            out = layer(out, out, out, mask) # value, key and query are all the same that's why it is out, out, out
+        return out
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, embed_size, heads, forward_expansion, dropout, device):
+        super(DecoderBlock, self).__init__()
+        self.attention = SelfAttention(embed_size, heads)
+        self.norm = nn.LayerNorm(embed_size)
+        self.transformer_block = TransformerBlock(
+            embed_size, heads, dropout, forward_expansion
+        )
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, value, key, src_mask, trg_mask):
+        attention = self.attention(x, x, x, trg_mask)
+        query = self.dropout(self.norm(attention + x))
+        out = self.transformer_block(value, key, query, src_mask)
+        return out
+
+
+class Decoder(nn.Module):
+    def __init__(self,
+                 trg_vocab_size,
+                 embed_size,
+                 num_layers,
+                 heads,
+                 forward_expansion,
+                 dropout,
+                 device,
+                 max_length):
+        super(Decoder, self).__init__()
+        self.device = device
+        self.word_embedding = nn.Embedding(trg_vocab_size, embed_size)
+        self.position_embedding = nn.Embedding(max_length, embed_size)
+
+        self.layers =nn.ModuleList(
+            [
+                DecoderBlock(embed_size, heads, forward_expansion, dropout, device)
+            ]
+        )
+
+        self.fc_out = nn.Linear(embed_size, trg_vocab_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, enc_out, src_mask, trg_mask):
+        N, seq_length = x.shape
+        positions = torch.arange(0, seq_length).expand(N, seq_length).to(self.device)
+        x = self.dropout((self.word_embedding(x) + self.position_embedding(positions)))
+
+        for layer in self.layers:
+            x = layer(x, enc_out, enc_out, src_mask, trg_mask)
+
+        out = self.fc_out(x)
+        return out
+
+
+
+
